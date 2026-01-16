@@ -40,7 +40,8 @@ export const parseOFX = async (file) => {
                 date: dateObj,
                 amount: parseFloat(amount.replace(',', '.')),
                 description: memo || 'Sem descrição',
-                linkedExpenseId: null // Campo para vincular ao sistema
+                linkedExpenseId: null, // Campo para vincular ao sistema
+                sourceType: 'banco'
             });
         }
       }
