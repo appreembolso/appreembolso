@@ -3,11 +3,13 @@ import {
   ArrowRightLeft, UploadCloud, Search, Calendar, 
   ArrowUpRight, ArrowDownLeft, Link as LinkIcon, 
   Unlink, Building, DollarSign, RefreshCw, Trash2, 
-  Edit2, X, Lock, FileText, AlertTriangle, CheckSquare, Square
+  Edit2, X, Lock, FileText, AlertTriangle, CheckSquare, Square,
+  CreditCard, Landmark, Filter, Calculator
 } from 'lucide-react';
 import { collection, query, getDocs, addDoc, updateDoc, doc, Timestamp, writeBatch } from 'firebase/firestore';
 import { db, appId } from '../services/firebase'; 
 import { parseOFX } from '../utils/ofxParser'; 
+import { parseCSV } from '../utils/csvParser';
 import { formatToBRL, getHexFromTailwind } from '../utils/helpers';
 
 // RECEBE 'allExpenses' DO APP.JSX
@@ -20,11 +22,13 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
   const [selectedMonth, setSelectedMonth] = useState(currentDate.getMonth().toString()); 
   const [selectedYear, setSelectedYear] = useState(currentDate.getFullYear().toString());
   const [filterValue, setFilterValue] = useState(''); 
+  const [filterText, setFilterText] = useState('');
+  const [filterSource, setFilterSource] = useState('all'); // 'all', 'banco', 'cartão'
   
   // Estado para Seleção Múltipla
   const [selectedIds, setSelectedIds] = useState([]);
 
-  // --- ESTILO DARK PREMIUM (VISUAL CORRIGIDO) ---
+  // --- ESTILO DARK PREMIUM (VISUAL DINÂMICO) ---
   const companyColor = currentCompany?.color || 'text-indigo-600';
   const borderColorClass = companyColor.replace('text-', 'border-').replace('600', '500');
 
@@ -35,6 +39,14 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
   const [linkModalOpen, setLinkModalOpen] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
+
+  // --- CÁLCULO DA SOMA AUTOMÁTICA ---
+  const selectedTotal = useMemo(() => {
+      if (selectedIds.length === 0) return 0;
+      return bankTransactions
+          .filter(t => selectedIds.includes(t.id))
+          .reduce((acc, curr) => acc + curr.amount, 0);
+  }, [selectedIds, bankTransactions]);
 
   // --- BUSCAR DADOS ---
   const fetchBankTransactions = async () => {
@@ -65,13 +77,29 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
           const matchDate = transDate.getMonth().toString() === selectedMonth && transDate.getFullYear().toString() === selectedYear;
           if (!matchDate) return false;
           
+          // Filtro de Valor
           if (filterValue) {
               const cleanFilter = filterValue.replace(',', '.');
               if (!Math.abs(t.amount).toFixed(2).includes(cleanFilter)) return false;
           }
+
+          // Filtro de Texto (Palavras)
+          if (filterText) {
+              const term = filterText.toLowerCase();
+              const desc = (t.description || '').toLowerCase();
+              const manualDesc = (t.manualDescription || '').toLowerCase();
+              if (!desc.includes(term) && !manualDesc.includes(term)) return false;
+          }
+
+          // Filtro de Origem
+          if (filterSource !== 'all') {
+              const source = t.sourceType || 'banco';
+              if (source !== filterSource) return false;
+          }
+
           return true;
       });
-  }, [bankTransactions, selectedMonth, selectedYear, filterValue]);
+  }, [bankTransactions, selectedMonth, selectedYear, filterValue, filterText, filterSource]);
 
   // --- LÓGICA DE SELEÇÃO ---
   const toggleSelectAll = () => {
@@ -94,12 +122,12 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
   };
 
   // --- AÇÕES ---
-  const handleFileUpload = async (e) => {
+  const handleFileUpload = async (e, type = 'ofx') => {
     const file = e.target.files[0];
     if (!file) return;
     setIsImporting(true);
     try {
-        const parsedData = await parseOFX(file);
+        const parsedData = type === 'ofx' ? await parseOFX(file) : await parseCSV(file);
         const collectionRef = collection(db, 'artifacts', appId, 'users', user.uid, 'bank_transactions');
         const existingIds = bankTransactions.map(t => t.fitid);
         const batchPromises = parsedData.map(async (item) => {
@@ -185,7 +213,6 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
     } catch (error) { alert("Erro: " + error.message); }
   };
 
-  // --- CORREÇÃO AQUI: LIMPANDO manualDescription ---
   const handleUnlink = async (trans) => {
       if(!confirm("Desvincular? A despesa voltará para 'A Pagar'.")) return;
       try {
@@ -194,7 +221,7 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
             linkedExpenseId: null,
             manualCompanyId: '', 
             manualReportId: '',
-            manualDescription: '' // <--- AGORA LIMPA A DESCRIÇÃO TAMBÉM
+            manualDescription: '' 
         });
         
         if (expenseId) {
@@ -208,7 +235,6 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
       } catch (err) { alert(err.message); }
   }
 
-  // --- HELPER DE EMPRESA ---
   const getCompanyData = (id) => {
       if (!companies || companies.length === 0) return null;
       let comp = companies.find(c => c.id === id);
@@ -234,12 +260,12 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
   const months = [{ v: '0', l: 'Janeiro' }, { v: '1', l: 'Fevereiro' }, { v: '2', l: 'Março' }, { v: '3', l: 'Abril' }, { v: '4', l: 'Maio' }, { v: '5', l: 'Junho' }, { v: '6', l: 'Julho' }, { v: '7', l: 'Agosto' }, { v: '8', l: 'Setembro' }, { v: '9', l: 'Outubro' }, { v: '10', l: 'Novembro' }, { v: '11', l: 'Dezembro' }];
   const years = ['2025', '2026', '2027', '2028', '2029', '2030'];
 
-  // --- RENDERIZAÇÃO DA LINHA ---
   const renderTransactionRow = (trans) => {
     const isCredit = trans.amount > 0;
     const isLinked = !!trans.linkedExpenseId;
     const isEditing = editingId === trans.id && editingField === 'description';
     const isSelected = selectedIds.includes(trans.id);
+    const sourceType = trans.sourceType || 'banco';
 
     const linkedExpense = allExpenses.find(e => e.id === trans.linkedExpenseId);
     const ownerCompanyId = trans.manualCompanyId || linkedExpense?.companyId;
@@ -305,7 +331,7 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
         {/* 2. DESCRIÇÕES */}
         <div className="flex-1 w-full grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="flex flex-col justify-center">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">Banco</span>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">{sourceType}</span>
                 <p className="text-xs font-bold text-slate-700 line-clamp-2" title={trans.description}>
                     {trans.description.replace('</MEMO>', '')}
                 </p>
@@ -349,7 +375,6 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
 
             <div className="flex items-center gap-2">
                 {isLinked ? (
-                    // --- CARD VINCULADO DARK PREMIUM (FIXO) ---
                     <div className={`flex items-center gap-3 bg-slate-900 border px-3 py-1.5 rounded-lg shadow-sm transition-all ${badgeBorderClass} ${isOtherCompany ? 'opacity-80 grayscale-[0.3]' : ''}`}>
                         <div className={`p-1 rounded bg-white/10 ${badgeColorClass}`}>
                             {badgeIcon}
@@ -403,25 +428,69 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
     );
   };
 
-  // Calcula quantos itens disponíveis (não vinculados) existem
   const availableCount = filteredTransactions.filter(t => !t.linkedExpenseId).length;
-  // Calcula se todos os disponíveis estão selecionados
   const isAllSelected = availableCount > 0 && selectedIds.length === availableCount;
 
   return (
-    <div className="flex flex-col h-full overflow-hidden bg-slate-50">
+    <div className="flex flex-col h-full overflow-hidden bg-slate-50 relative">
       
-      {/* HEADER DARK PREMIUM - ATUALIZADO */}
-      <div className={`min-h-20 px-8 py-4 flex flex-col lg:flex-row justify-between lg:items-center gap-4 shrink-0 bg-slate-900 border-b-4 ${borderColorClass} shadow-md z-20`}>
-        <div>
-            <h2 className="text-xl font-bold text-white tracking-tight flex items-center gap-3">
-                <ArrowRightLeft size={24} className={companyColor} />
-                Conciliação Bancária
-            </h2>
-            <p className="text-xs text-slate-400 font-medium pl-9">Vincule o extrato bancário com as despesas</p>
+      {/* HEADER DARK PREMIUM COM LAYOUT FLUIDO */}
+      <div className={`min-h-20 px-8 py-4 flex flex-col xl:flex-row justify-between xl:items-center gap-4 shrink-0 bg-slate-900 border-b-4 ${borderColorClass} shadow-md z-20`}>
+        <div className="flex items-center gap-3 shrink-0">
+            {/* ÍCONE COM COR DINÂMICA */}
+            <ArrowRightLeft size={24} className={companyColor} />
+            <div>
+                <h2 className="text-xl font-bold text-white tracking-tight">Conciliação Bancária</h2>
+                <p className="text-xs text-slate-400 font-medium">Vincule o extrato bancário com as despesas</p>
+            </div>
         </div>
         
-        <div className="flex items-center gap-3">
+        {/* CONTAINER DA DIREITA: SOMA + FILTROS NA MESMA LINHA (WRAP SE PRECISAR) */}
+        <div className="flex items-center gap-3 flex-wrap justify-end">
+            
+            {/* PAINEL DE SELEÇÃO E AÇÕES (SÓ APARECE SE SELECIONADO) */}
+            {selectedIds.length > 0 && (
+                <div className="flex items-center gap-6 mr-2 bg-slate-900 border border-indigo-500/50 px-6 py-2 rounded-xl shadow-2xl animate-in fade-in slide-in-from-right-4 z-50">
+                    
+                    {/* 1. CONTADOR (Texto simples) */}
+                    <div className="flex flex-col items-start">
+                        <span className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest">Itens</span>
+                        <span className="text-lg font-bold text-white flex items-center gap-2">
+                            <CheckSquare size={16} className="text-indigo-400"/>
+                            {selectedIds.length}
+                        </span>
+                    </div>
+
+                    <div className="w-px h-10 bg-indigo-500/30"></div>
+
+                    {/* 2. VALOR (EM BOTÃO/CONTAINER SEPARADO E FONTE GRANDE) */}
+                    <div className="px-4 py-2 bg-slate-800 rounded-lg border border-slate-700 shadow-inner min-w-[140px] text-center">
+                        <span className={`text-2xl font-mono font-bold tracking-tight ${selectedTotal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                           {formatToBRL(selectedTotal)}
+                        </span>
+                    </div>
+
+                    <div className="w-px h-10 bg-indigo-500/30"></div>
+
+                    {/* 3. BOTÕES DE AÇÃO */}
+                    <div className="flex items-center gap-3">
+                        <button 
+                            onClick={() => setSelectedIds([])} 
+                            className="px-6 py-3 bg-indigo-800 hover:bg-indigo-700 text-white rounded-lg shadow-sm text-xs font-bold transition-all uppercase tracking-wider border border-indigo-700"
+                        >
+                            DESMARCAR
+                        </button>
+                        <button 
+                            onClick={handleBatchDelete} 
+                            className="px-6 py-3 bg-red-600 hover:bg-red-500 text-white rounded-lg shadow-md text-xs font-bold transition-all uppercase tracking-wider"
+                        >
+                            EXCLUIR
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* FILTROS (MANTIDOS VISÍVEIS) */}
             <div className="flex items-center gap-2 bg-slate-800 p-1 rounded-lg border border-slate-700 shadow-sm">
                 <div className="flex items-center px-2 text-slate-400"><Calendar size={14}/></div>
                 <select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} className="text-xs font-bold text-slate-200 bg-transparent outline-none py-1 cursor-pointer hover:text-white">
@@ -435,74 +504,86 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
 
             <div className="relative">
                 <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-bold text-xs"><DollarSign size={12}/></div>
-                <input type="text" placeholder="Valor..." value={filterValue} onChange={(e) => setFilterValue(e.target.value)} className="pl-8 pr-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 text-xs font-bold outline-none text-white focus:border-slate-500 w-24 placeholder-slate-500 transition-all"/>
+                <input type="text" placeholder="Valor..." value={filterValue} onChange={(e) => setFilterValue(e.target.value)} className="pl-8 pr-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 text-xs font-bold outline-none text-white focus:border-slate-500 w-20 placeholder-slate-500 transition-all"/>
             </div>
 
-            {/* BOTÃO EXCLUIR */}
-            {selectedIds.length > 0 && (
-                <button 
-                    onClick={handleBatchDelete} 
-                    className="px-4 py-1.5 rounded-lg border border-red-600 bg-red-600 text-white hover:bg-red-700 text-xs font-bold transition-all shadow-lg shadow-red-900/20 flex items-center gap-2 animate-in fade-in zoom-in" 
-                    title="Excluir itens selecionados"
-                >
-                    <Trash2 size={14}/> Excluir ({selectedIds.length})
-                </button>
-            )}
+            <div className="relative">
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-bold text-xs"><Search size={12}/></div>
+                <input type="text" placeholder="Palavras..." value={filterText} onChange={(e) => setFilterText(e.target.value)} className="pl-8 pr-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 text-xs font-bold outline-none text-white focus:border-slate-500 w-24 placeholder-slate-500 transition-all"/>
+            </div>
 
-            <label className={`flex items-center gap-2 px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg shadow-emerald-900/20 transition-all transform hover:scale-105 active:scale-95 cursor-pointer ${isImporting ? 'opacity-50 pointer-events-none' : ''}`}>
-                {isImporting ? <RefreshCw className="animate-spin" size={14}/> : <UploadCloud size={14} />}
-                {isImporting ? 'LENDO...' : 'IMPORTAR OFX'}
-                <input type="file" accept=".ofx" onChange={handleFileUpload} className="hidden" />
-            </label>
+            <div className="flex bg-slate-800 p-1 rounded-lg border border-slate-700">
+                <button onClick={() => setFilterSource('all')} className={`px-2 py-1 text-[9px] font-bold rounded transition ${filterSource === 'all' ? 'bg-slate-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}>TODAS</button>
+                <button onClick={() => setFilterSource('banco')} className={`px-2 py-1 text-[9px] font-bold rounded transition ${filterSource === 'banco' ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}>BANCO</button>
+                <button onClick={() => setFilterSource('cartão')} className={`px-2 py-1 text-[9px] font-bold rounded transition ${filterSource === 'cartão' ? 'bg-amber-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}>CARTÃO</button>
+            </div>
+
+            <div className="relative group">
+                <button className="flex items-center gap-2 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg shadow-lg transition-all">
+                    <UploadCloud size={18}/> IMPORTAR
+                </button>
+                <div className="absolute right-0 top-full mt-2 w-48 bg-slate-800 rounded-xl shadow-2xl border border-slate-700 py-2 hidden group-hover:block z-50">
+                    <label className="flex items-center gap-3 px-4 py-2 hover:bg-slate-700 cursor-pointer text-xs text-slate-200 font-bold">
+                        <Landmark size={14} className="text-blue-400"/> EXTRATO OFX (BANCO)
+                        <input type="file" accept=".ofx" className="hidden" onChange={(e) => handleFileUpload(e, 'ofx')} disabled={isImporting}/>
+                    </label>
+                    <label className="flex items-center gap-3 px-4 py-2 hover:bg-slate-700 cursor-pointer text-xs text-slate-200 font-bold">
+                        <CreditCard size={14} className="text-amber-400"/> FATURA CSV (CARTÃO)
+                        <input type="file" accept=".csv" className="hidden" onChange={(e) => handleFileUpload(e, 'csv')} disabled={isImporting}/>
+                    </label>
+                </div>
+            </div>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
-        <div className="flex justify-between items-center mb-4 px-2">
-            <div className="flex items-center gap-4">
-                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wide flex items-center gap-2">
-                    <FileText size={14}/> Transações de {months.find(m => m.v === selectedMonth)?.l}/{selectedYear}
-                </h3>
-                
-                {/* --- BOTÃO SELECIONAR (CORRIGIDO PARA CINZA) --- */}
-                {availableCount > 0 && (
-                    <div 
-                        onClick={toggleSelectAll} 
-                        className="flex items-center gap-2 cursor-pointer text-xs font-bold text-slate-600 hover:text-slate-800 transition-colors select-none bg-slate-100 px-2 py-1 rounded border border-slate-200"
+      {/* LISTA DE TRANSAÇÕES */}
+      <div className="flex-1 overflow-y-auto p-8 pt-6">
+        <div className="max-w-7xl mx-auto">
+            <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-4">
+                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                        <FileText size={14}/> Transações de {months.find(m => m.v === selectedMonth)?.l}/{selectedYear}
+                    </h3>
+                    <button 
+                        onClick={toggleSelectAll}
+                        className={`flex items-center gap-2 px-3 py-1 rounded-lg border text-[10px] font-bold transition-all ${isAllSelected ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'bg-white border-slate-200 text-slate-500 hover:border-indigo-300'}`}
                     >
-                        {isAllSelected ? <CheckSquare size={14}/> : <Square size={14}/>}
-                        {isAllSelected ? 'Desmarcar Todos' : 'Selecionar Disponíveis'}
-                    </div>
-                )}
+                        {isAllSelected ? <CheckSquare size={12}/> : <Square size={12}/>}
+                        Selecionar Disponíveis
+                    </button>
+                </div>
+                <div className="bg-slate-200/50 px-3 py-1 rounded-full">
+                    <span className="text-[10px] font-bold text-slate-500">{filteredTransactions.length} Lançamentos</span>
+                </div>
             </div>
-            
-            <span className="text-[10px] font-bold text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">
-                {filteredTransactions.length} Lançamentos
-            </span>
-        </div>
 
-        <div className="space-y-3">
-            {filteredTransactions.length > 0 ? (
-                filteredTransactions.map(trans => renderTransactionRow(trans))
-            ) : (
-                <div className="flex flex-col items-center justify-center py-20 opacity-50">
-                    <div className="bg-slate-200 p-4 rounded-full mb-3">
-                        <UploadCloud size={32} className="text-slate-400"/>
+            {loading ? (
+                <div className="flex flex-col items-center justify-center py-20 gap-4">
+                    <RefreshCw size={40} className="text-indigo-600 animate-spin" />
+                    <p className="text-slate-400 font-medium animate-pulse">Buscando lançamentos...</p>
+                </div>
+            ) : filteredTransactions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-20 bg-white rounded-2xl border-2 border-dashed border-slate-200">
+                    <div className="p-4 bg-slate-50 rounded-full mb-4">
+                        <Search size={32} className="text-slate-300" />
                     </div>
-                    <p className="text-sm font-bold text-slate-500">Nenhum lançamento encontrado</p>
-                    <p className="text-xs text-slate-400 mt-1">Verifique os filtros ou importe um arquivo OFX.</p>
+                    <p className="text-slate-400 font-medium">Nenhum lançamento encontrado para este período.</p>
+                </div>
+            ) : (
+                <div className="space-y-1">
+                    {filteredTransactions.map(renderTransactionRow)}
                 </div>
             )}
         </div>
       </div>
 
-      {/* MODAL MANTIDO IGUAL */}
+      {/* MODAL DE VÍNCULO */}
       {linkModalOpen && (
-        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[150] flex items-center justify-center p-4 animate-in fade-in duration-200">
             <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[85vh] animate-in zoom-in-95 duration-200">
                 <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                     <div>
-                        <h3 className="font-bold text-base text-slate-800 flex items-center gap-2"><LinkIcon size={16} className="text-indigo-600"/> Vincular Lançamento Bancário</h3>
+                        <h3 className="font-bold text-base text-slate-800 flex items-center gap-2"><LinkIcon size={16} className="text-indigo-600"/> Vincular Lançamento</h3>
                         <div className="flex items-center gap-2 mt-1">
                             <span className="text-xs bg-slate-200 px-2 py-0.5 rounded text-slate-600 font-mono truncate max-w-[300px]">
                                 {selectedTransaction?.description.replace('</MEMO>', '')}
