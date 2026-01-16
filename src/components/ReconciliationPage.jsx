@@ -2,17 +2,16 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   ArrowRightLeft, UploadCloud, Search, Calendar, 
   ArrowUpRight, ArrowDownLeft, Link as LinkIcon, 
-  Unlink, Building, DollarSign, RefreshCw, Trash2, 
-  Edit2, X, Lock, FileText, AlertTriangle, CheckSquare, Square,
+  Unlink, Building, DollarSign, RefreshCw, 
+  Edit2, X, Lock, FileText, CheckSquare, Square,
   CreditCard, Landmark, Filter, Calculator
 } from 'lucide-react';
 import { collection, query, getDocs, addDoc, updateDoc, doc, Timestamp, writeBatch } from 'firebase/firestore';
 import { db, appId } from '../services/firebase'; 
 import { parseOFX } from '../utils/ofxParser'; 
-import { parseCSV } from '../utils/csvParser';
-import { formatToBRL, getHexFromTailwind } from '../utils/helpers';
+// parseCSV removido pois faremos localmente para corrigir o erro das aspas
+import { formatToBRL } from '../utils/helpers';
 
-// RECEBE 'allExpenses' DO APP.JSX
 const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onViewReport, currentCompany }) => { 
   const [bankTransactions, setBankTransactions] = useState([]);
   const [isImporting, setIsImporting] = useState(false);
@@ -23,7 +22,7 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
   const [selectedYear, setSelectedYear] = useState(currentDate.getFullYear().toString());
   const [filterValue, setFilterValue] = useState(''); 
   const [filterText, setFilterText] = useState('');
-  const [filterSource, setFilterSource] = useState('all'); // 'all', 'banco', 'cartão'
+  const [filterSource, setFilterSource] = useState('all'); 
   
   // Estado para Seleção Múltipla
   const [selectedIds, setSelectedIds] = useState([]);
@@ -39,6 +38,9 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
   const [linkModalOpen, setLinkModalOpen] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
+
+  // --- CONTROLE DO MENU DE IMPORTAÇÃO ---
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
 
   // --- CÁLCULO DA SOMA AUTOMÁTICA ---
   const selectedTotal = useMemo(() => {
@@ -77,13 +79,11 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
           const matchDate = transDate.getMonth().toString() === selectedMonth && transDate.getFullYear().toString() === selectedYear;
           if (!matchDate) return false;
           
-          // Filtro de Valor
           if (filterValue) {
               const cleanFilter = filterValue.replace(',', '.');
               if (!Math.abs(t.amount).toFixed(2).includes(cleanFilter)) return false;
           }
 
-          // Filtro de Texto (Palavras)
           if (filterText) {
               const term = filterText.toLowerCase();
               const desc = (t.description || '').toLowerCase();
@@ -91,7 +91,6 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
               if (!desc.includes(term) && !manualDesc.includes(term)) return false;
           }
 
-          // Filtro de Origem
           if (filterSource !== 'all') {
               const source = t.sourceType || 'banco';
               if (source !== filterSource) return false;
@@ -121,15 +120,78 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
       );
   };
 
-  // --- AÇÕES ---
+  // --- AÇÕES: IMPORTAÇÃO CSV CORRIGIDA (REGEX + INVERSÃO DE SINAL) ---
   const handleFileUpload = async (e, type = 'ofx') => {
     const file = e.target.files[0];
     if (!file) return;
     setIsImporting(true);
+    setImportMenuOpen(false);
+    
     try {
-        const parsedData = type === 'ofx' ? await parseOFX(file) : await parseCSV(file);
+        let parsedData = [];
+
+        if (type === 'ofx') {
+            parsedData = await parseOFX(file);
+        } else {
+            // --- PARSER CSV MANUAL ---
+            const text = await file.text();
+            const lines = text.split(/\r\n|\n/);
+            
+            parsedData = lines.map((line, index) => {
+                if (!line.trim()) return null;
+                
+                // REGEX PODEROSA: Separa por vírgula, mas IGNORA vírgulas dentro de aspas (ex: "R$ 5,91")
+                const columns = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+                
+                // Limpa aspas extras das colunas
+                const cleanCols = columns.map(c => c.replace(/^"|"$/g, '').trim());
+
+                // Ignora cabeçalho (se última coluna não for número)
+                const lastColVal = cleanCols[cleanCols.length - 1];
+                // Verifica se é cabeçalho procurando texto 'Valor' ou se não é numérico
+                if (index === 0 && (lastColVal.toLowerCase().includes('valor') || isNaN(parseFloat(lastColVal.replace(/[^\d,-]/g, '').replace(',', '.'))))) return null;
+
+                // 1. DATA (DD/MM/YYYY)
+                const dateStr = cleanCols.find(c => /\d{2}\/\d{2}\/\d{4}/.test(c));
+                if (!dateStr) return null;
+
+                const [d, m, y] = dateStr.split('/');
+                const dateObj = new Date(`${y}-${m}-${d}T12:00:00`); 
+                if (isNaN(dateObj.getTime())) return null;
+
+                // 2. VALOR (Formato R$ 1.000,00 ou 5,91)
+                const valueStr = cleanCols.find(c => c.includes('$') || /-?\d+,\d{2}/.test(c));
+                let amount = 0;
+                
+                if (valueStr) {
+                    // Remove tudo que não for dígito, vírgula ou sinal de menos
+                    let cleanValue = valueStr.replace(/[^\d,-]/g, ''); 
+                    // Troca vírgula por ponto
+                    cleanValue = cleanValue.replace(',', '.');
+                    
+                    amount = parseFloat(cleanValue);
+                    
+                    // INVERSÃO DE SINAL: Multiplica por -1
+                    amount = amount * -1; 
+                }
+
+                // 3. DESCRIÇÃO (Pega a coluna de texto mais longa que não seja data/valor)
+                const description = cleanCols.find(c => c !== dateStr && c !== valueStr && c.length > 3) || 'Sem descrição';
+
+                return {
+                    fitid: `csv-${dateObj.getTime()}-${Math.abs(amount)}-${index}`,
+                    date: dateObj,
+                    amount: amount,
+                    description: description,
+                    memo: '',
+                    sourceType: 'cartão'
+                };
+            }).filter(item => item !== null && !isNaN(item.amount));
+        }
+
         const collectionRef = collection(db, 'artifacts', appId, 'users', user.uid, 'bank_transactions');
         const existingIds = bankTransactions.map(t => t.fitid);
+        
         const batchPromises = parsedData.map(async (item) => {
             if (existingIds.includes(item.fitid)) return; 
             await addDoc(collectionRef, {
@@ -137,10 +199,17 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
                 manualDescription: '', manualReportId: '', manualCompanyId: '' 
             });
         });
+        
         await Promise.all(batchPromises);
-        alert(`Importação concluída!`);
+        alert(`Importação concluída! ${parsedData.length} itens processados.`);
         fetchBankTransactions();
-    } catch (error) { alert("Erro na importação: " + error.message); } finally { setIsImporting(false); e.target.value = null; }
+    } catch (error) { 
+        alert("Erro na importação: " + error.message); 
+        console.error(error);
+    } finally { 
+        setIsImporting(false); 
+        e.target.value = null; 
+    }
   };
 
   const handleBatchDelete = async () => {
@@ -445,14 +514,14 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
             </div>
         </div>
         
-        {/* CONTAINER DA DIREITA: SOMA + FILTROS NA MESMA LINHA (WRAP SE PRECISAR) */}
+        {/* CONTAINER DA DIREITA: SOMA + FILTROS NA MESMA LINHA */}
         <div className="flex items-center gap-3 flex-wrap justify-end">
             
             {/* PAINEL DE SELEÇÃO E AÇÕES (SÓ APARECE SE SELECIONADO) */}
             {selectedIds.length > 0 && (
                 <div className="flex items-center gap-6 mr-2 bg-slate-900 border border-indigo-500/50 px-6 py-2 rounded-xl shadow-2xl animate-in fade-in slide-in-from-right-4 z-50">
                     
-                    {/* 1. CONTADOR (Texto simples) */}
+                    {/* 1. CONTADOR */}
                     <div className="flex flex-col items-start">
                         <span className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest">Itens</span>
                         <span className="text-lg font-bold text-white flex items-center gap-2">
@@ -463,7 +532,7 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
 
                     <div className="w-px h-10 bg-indigo-500/30"></div>
 
-                    {/* 2. VALOR (EM BOTÃO/CONTAINER SEPARADO E FONTE GRANDE) */}
+                    {/* 2. VALOR (EM CONTAINER SEPARADO E GRANDE) */}
                     <div className="px-4 py-2 bg-slate-800 rounded-lg border border-slate-700 shadow-inner min-w-[140px] text-center">
                         <span className={`text-2xl font-mono font-bold tracking-tight ${selectedTotal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                            {formatToBRL(selectedTotal)}
@@ -474,12 +543,14 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
 
                     {/* 3. BOTÕES DE AÇÃO */}
                     <div className="flex items-center gap-3">
+                        {/* BOTÃO DESMARCAR (ESTILO SÓLIDO AZUL) */}
                         <button 
                             onClick={() => setSelectedIds([])} 
                             className="px-6 py-3 bg-indigo-800 hover:bg-indigo-700 text-white rounded-lg shadow-sm text-xs font-bold transition-all uppercase tracking-wider border border-indigo-700"
                         >
                             DESMARCAR
                         </button>
+                        {/* BOTÃO EXCLUIR (ESTILO SÓLIDO VERMELHO) */}
                         <button 
                             onClick={handleBatchDelete} 
                             className="px-6 py-3 bg-red-600 hover:bg-red-500 text-white rounded-lg shadow-md text-xs font-bold transition-all uppercase tracking-wider"
@@ -518,20 +589,36 @@ const ReconciliationPage = ({ user, expenses, allExpenses = [], companies, onVie
                 <button onClick={() => setFilterSource('cartão')} className={`px-2 py-1 text-[9px] font-bold rounded transition ${filterSource === 'cartão' ? 'bg-amber-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}>CARTÃO</button>
             </div>
 
-            <div className="relative group">
-                <button className="flex items-center gap-2 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg shadow-lg transition-all">
+            {/* BOTÃO IMPORTAR COM MENU CLICK (E BACKDROP) */}
+            <div className="relative">
+                <button 
+                    onClick={() => setImportMenuOpen(!importMenuOpen)}
+                    className="flex items-center gap-2 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg shadow-lg transition-all cursor-pointer"
+                >
                     <UploadCloud size={18}/> IMPORTAR
                 </button>
-                <div className="absolute right-0 top-full mt-2 w-48 bg-slate-800 rounded-xl shadow-2xl border border-slate-700 py-2 hidden group-hover:block z-50">
-                    <label className="flex items-center gap-3 px-4 py-2 hover:bg-slate-700 cursor-pointer text-xs text-slate-200 font-bold">
-                        <Landmark size={14} className="text-blue-400"/> EXTRATO OFX (BANCO)
-                        <input type="file" accept=".ofx" className="hidden" onChange={(e) => handleFileUpload(e, 'ofx')} disabled={isImporting}/>
-                    </label>
-                    <label className="flex items-center gap-3 px-4 py-2 hover:bg-slate-700 cursor-pointer text-xs text-slate-200 font-bold">
-                        <CreditCard size={14} className="text-amber-400"/> FATURA CSV (CARTÃO)
-                        <input type="file" accept=".csv" className="hidden" onChange={(e) => handleFileUpload(e, 'csv')} disabled={isImporting}/>
-                    </label>
-                </div>
+                
+                {/* BACKDROP INVISÍVEL PARA FECHAR AO CLICAR FORA */}
+                {importMenuOpen && (
+                    <div 
+                        className="fixed inset-0 z-40 cursor-default" 
+                        onClick={() => setImportMenuOpen(false)}
+                    />
+                )}
+
+                {/* MENU DROP DOWN */}
+                {importMenuOpen && (
+                    <div className="absolute right-0 top-full mt-2 w-48 bg-slate-800 rounded-xl shadow-2xl border border-slate-700 py-2 z-50 animate-in fade-in zoom-in-95 duration-100">
+                        <label className="flex items-center gap-3 px-4 py-2 hover:bg-slate-700 cursor-pointer text-xs text-slate-200 font-bold transition-colors">
+                            <Landmark size={14} className="text-blue-400"/> EXTRATO OFX (BANCO)
+                            <input type="file" accept=".ofx" className="hidden" onChange={(e) => handleFileUpload(e, 'ofx')} disabled={isImporting}/>
+                        </label>
+                        <label className="flex items-center gap-3 px-4 py-2 hover:bg-slate-700 cursor-pointer text-xs text-slate-200 font-bold transition-colors">
+                            <CreditCard size={14} className="text-amber-400"/> FATURA CSV (CARTÃO)
+                            <input type="file" accept=".csv" className="hidden" onChange={(e) => handleFileUpload(e, 'csv')} disabled={isImporting}/>
+                        </label>
+                    </div>
+                )}
             </div>
         </div>
       </div>
